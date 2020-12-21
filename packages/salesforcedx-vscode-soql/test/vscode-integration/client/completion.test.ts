@@ -43,8 +43,8 @@ describe('Should do completion', async () => {
   ]);
 
   testCompletion('SELECT | FROM Account', [
-    { label: 'Id', kind: vscode.CompletionItemKind.Field },
-    { label: 'Name', kind: vscode.CompletionItemKind.Field },
+    { label: 'Id 🔑', kind: vscode.CompletionItemKind.Field },
+    { label: 'Name 🔤', kind: vscode.CompletionItemKind.Field },
     {
       label: '(SELECT ... FROM ...)',
       kind: vscode.CompletionItemKind.Snippet,
@@ -52,8 +52,8 @@ describe('Should do completion', async () => {
     }
   ]);
   testCompletion('SELECT | FROM User', [
-    { label: 'Id', kind: vscode.CompletionItemKind.Field },
-    { label: 'Name', kind: vscode.CompletionItemKind.Field },
+    { label: 'Id 🔑', kind: vscode.CompletionItemKind.Field },
+    { label: 'Name 🔤', kind: vscode.CompletionItemKind.Field },
     { label: 'AccountId', kind: vscode.CompletionItemKind.Field },
     {
       label: 'Account (Account)',
