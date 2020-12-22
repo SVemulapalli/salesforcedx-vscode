@@ -5,12 +5,13 @@
  * For full license text, see LICENSE.txt file in the repo root or https://opensource.org/licenses/BSD-3-Clause
  */
 
-import { CompletionItemKind } from 'vscode';
+import { CompletionItemKind, SnippetString } from 'vscode';
 import ProtocolCompletionItem from 'vscode-languageclient/lib/protocolCompletionItem';
 import { retrieveSObject, retrieveSObjects } from '../sfdx';
 
 import { Middleware } from 'vscode-languageclient';
-import { FieldType } from 'jsforce';
+
+const EXPANDABLE_ITEM_PATTERN = /__([A-Z_]+)/;
 
 export const middleware: Middleware = {
   // The SOQL LSP server may include special completion items as "placeholders" for
@@ -26,39 +27,76 @@ export const middleware: Middleware = {
       token
     )) as ProtocolCompletionItem[];
 
-    return expandPlaceholders(items);
+    return expandPlaceholders(await filterByContext(items));
   }
 };
 
-const expandableItemPattern = /__([A-Z_]+)(:(\w+(,\w+)*))?/;
+interface SoqlItemContext {
+  sobjectName: string;
+  fieldName?: string;
+  notNillable?: boolean;
+}
+
+async function filterByContext(
+  items: ProtocolCompletionItem[]
+): Promise<ProtocolCompletionItem[]> {
+  const filteredItems: ProtocolCompletionItem[] = [];
+
+  for (const item of items) {
+    if (
+      !EXPANDABLE_ITEM_PATTERN.test(item.label) &&
+      item?.data?.soqlContext?.sobjectName
+    ) {
+      const objMetadata = await retrieveSObject(
+        item.data.soqlContext.sobjectName
+      );
+      const fieldMeta = objMetadata.fields.find(
+        field => field.name === item.data.soqlContext.fieldName
+      );
+      if (fieldMeta && !operatorsByType[fieldMeta.type].includes(item.label)) {
+        continue;
+      }
+    }
+
+    filteredItems.push(item);
+  }
+
+  return filteredItems;
+}
+
 async function expandPlaceholders(
   items: ProtocolCompletionItem[]
 ): Promise<ProtocolCompletionItem[]> {
   const expandedItems = [...items];
 
-  items.forEach(async (item, index) => {
-    const m = item.label.match(expandableItemPattern);
-    if (m) {
-      const command = m[1];
-      const args = m[3] ? m[3].split(',') : [];
+  for (const [index, item] of items.entries()) {
+    const parsedCommand = item.label.match(EXPANDABLE_ITEM_PATTERN);
+    if (parsedCommand) {
+      const commandName = parsedCommand[1];
 
-      const handler = expandFunctions[command];
+      const handler = expandFunctions[commandName];
       if (!handler) {
-        console.log(`Unknown SOQL completion command ${command}!`);
+        console.log(`Unknown SOQL completion command ${commandName}!`);
       }
 
-      expandedItems.splice(index, 1, ...(await handler(args)));
+      expandedItems.splice(
+        index,
+        1,
+        ...(await handler(item?.data?.soqlContext))
+      );
     }
-  });
+  }
 
   return expandedItems;
 }
 
 const expandFunctions: {
-  [key: string]: (args: string[]) => Promise<ProtocolCompletionItem[]>;
+  [key: string]: (
+    soqlContext?: SoqlItemContext
+  ) => Promise<ProtocolCompletionItem[]>;
 } = {
   SOBJECTS_PLACEHOLDER: async (
-    args: string[]
+    soqlContext?: SoqlItemContext
   ): Promise<ProtocolCompletionItem[]> => {
     try {
       const sobjectItems = (await retrieveSObjects()).map(objName => {
@@ -66,6 +104,7 @@ const expandFunctions: {
         item.kind = CompletionItemKind.Class;
         return item;
       });
+
       return sobjectItems;
     } catch (metadataErrors) {
       return [];
@@ -73,25 +112,33 @@ const expandFunctions: {
   },
 
   SOBJECT_FIELDS_PLACEHOLDER: async (
-    args: string[]
+    soqlContext?: SoqlItemContext
   ): Promise<ProtocolCompletionItem[]> => {
+    if (!soqlContext?.sobjectName) {
+      console.log('SOBJECT_FIELDS_PLACEHOLDER missing `sobjectName`!');
+      return [];
+    }
+
     try {
-      const objMetadata = await retrieveSObject(args[0]);
+      const objMetadata = await retrieveSObject(soqlContext.sobjectName);
       const sobjectFields = objMetadata.fields.reduce((fieldItems, field) => {
         const icon = iconsByFieldType[field.type];
         fieldItems.push(
-          newFieldCompletionItem(
+          newCompletionItem(
             field.name + (icon ? ' ' + icon : ''),
-            field.name
+            field.name,
+            CompletionItemKind.Field,
+            field.type
           )
         );
 
         if (field.relationshipName) {
           fieldItems.push(
-            newFieldCompletionItem(
-              `${field.relationshipName} \(${field.referenceTo}\)`,
+            newCompletionItem(
+              `${field.relationshipName}`,
               field.relationshipName + '.',
-              CompletionItemKind.Class
+              CompletionItemKind.Class,
+              'Ref. to ' + field.referenceTo
             )
           );
         }
@@ -102,14 +149,118 @@ const expandFunctions: {
     } catch (metadataError) {
       return [];
     }
+  },
+  LITERAL_VALUES_FOR_FIELD: async (
+    soqlContext?: SoqlItemContext
+  ): Promise<ProtocolCompletionItem[]> => {
+    let items: ProtocolCompletionItem[] = [];
+
+    if (!soqlContext?.sobjectName || !soqlContext?.fieldName) {
+      console.log('LITERAL_VALUES_FOR_FIELD missing `sobjectName/fieldName`!');
+      return [];
+    }
+
+    try {
+      const objMetadata = await retrieveSObject(soqlContext.sobjectName);
+      const nillables = objMetadata.fields
+        // .filter(field => field.nillable)
+        .map(f => ({ name: f.name, type: f.type, nillable: f.nillable }));
+      if (nillables) {
+        // debugger;
+        console.log('for debugging');
+      }
+      const fieldMeta = objMetadata.fields.find(
+        field => field.name === soqlContext.fieldName
+      );
+      if (fieldMeta) {
+        if (
+          ['picklist', 'multipicklist'].includes(fieldMeta.type) &&
+          fieldMeta?.picklistValues
+        ) {
+          items = items.concat(
+            fieldMeta.picklistValues
+              .filter(v => v.active)
+              .map(v =>
+                newCompletionItem(
+                  v.value,
+                  "'" + v.value + "'",
+                  CompletionItemKind.Value
+                )
+              )
+          );
+        } else if (fieldMeta.type === 'boolean') {
+          items.push(
+            newCompletionItem('TRUE', 'TRUE', CompletionItemKind.Value)
+          );
+          items.push(
+            newCompletionItem('FALSE', 'FALSE', CompletionItemKind.Value)
+          );
+        } else if (fieldMeta.type === 'date') {
+          items.push(
+            newCompletionItem(
+              'YYYY-MM-DD',
+              '${1:${CURRENT_YEAR}}-${2:${CURRENT_MONTH}}-${3:${CURRENT_DATE}}$0',
+              CompletionItemKind.Snippet
+            )
+          );
+        } else if (fieldMeta.type === 'datetime') {
+          items.push(
+            newCompletionItem(
+              'YYYY-MM-DDThh:mm:ssZ',
+              '${1:${CURRENT_YEAR}}-${2:${CURRENT_MONTH}}-${3:${CURRENT_DATE}}T${4:${CURRENT_HOUR}}:${5:${CURRENT_MINUTE}}:${6:${CURRENT_SECOND}}Z$0',
+              CompletionItemKind.Snippet
+            )
+          );
+        }
+
+        if (fieldMeta.nillable && !soqlContext.notNillable) {
+          items.push(
+            newCompletionItem('NULL', 'NULL', CompletionItemKind.Keyword)
+          );
+        }
+      }
+
+      return items;
+    } catch (metadataError) {
+      return [];
+    }
   }
+};
+
+// All types allow equality operators
+// Here we list the extra operators supported on each type
+const operatorsByType: { [key: string]: string[] } = {
+  address: [],
+  anyType: ['<', '<=', '>=', '>'],
+  base64: [],
+  boolean: [],
+  combobox: [],
+  complexvalue: ['<', '<=', '>=', '>'],
+  currency: ['<', '<=', '>=', '>'],
+  date: ['<', '<=', '>=', '>'],
+  datetime: ['<', '<=', '>=', '>'],
+  double: ['<', '<=', '>=', '>'],
+  email: [],
+  encryptedstring: [],
+  int: ['<', '<=', '>=', '>'],
+  id: [],
+  location: [],
+  percent: ['<', '<=', '>=', '>'],
+  phone: [],
+  picklist: [],
+  multipicklist: ['INCLUDES(', 'EXCLUDES('],
+  reference: [],
+  string: ['<', '<=', '>=', '>', 'LIKE'],
+  textarea: ['<', '<=', '>=', '>', 'LIKE'],
+  time: ['<', '<=', '>=', '>', 'LIKE'],
+  url: ['<', '<=', '>=', '>']
 };
 
 const iconsByFieldType = {
   address: '📍',
   anyType: '',
   base64: '',
-  boolean: '',
+  boolean: '⁰/₁',
   combobox: '',
   complexvalue: '',
   currency: '💰',
@@ -124,7 +275,7 @@ const iconsByFieldType = {
   percent: '%',
   phone: '📞',
   picklist: '✅',
-  multipicklist: '',
+  multipicklist: '✅ ✅',
   reference: '',
   string: '🔤',
   textarea: '🔡',
@@ -132,13 +283,35 @@ const iconsByFieldType = {
   url: '🔗'
 };
 
-function newFieldCompletionItem(
+function newCompletionItem(
   label: string,
   insertText?: string,
-  kind: CompletionItemKind = CompletionItemKind.Field
+  kind: CompletionItemKind = CompletionItemKind.Field,
+  detail?: string
+): ProtocolCompletionItem {
+  const item = new ProtocolCompletionItem(label);
+  item.kind = kind;
+  item.insertText =
+    kind === CompletionItemKind.Snippet
+      ? new SnippetString(insertText)
+      : insertText;
+  item.detail = detail;
+
+  return item;
+}
+
+function newSnippetCompletionItem(
+  label: string,
+  insertText?: string,
+  kind: CompletionItemKind = CompletionItemKind.Snippet,
+  detail?: string
 ): ProtocolCompletionItem {
   const item = new ProtocolCompletionItem(label);
   item.kind = kind;
   item.insertText = insertText;
+  item.detail = detail;
+
   return item;
 }
+
+//insertTextFormat: InsertTextFormat.Snippet,
