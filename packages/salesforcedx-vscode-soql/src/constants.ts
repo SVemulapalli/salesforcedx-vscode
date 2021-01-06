@@ -53,3 +53,8 @@ export const QUERY_RESULTS_DIR_PATH = path.join(
 );
 export const DATA_CSV_EXT = 'csv';
 export const DATA_JSON_EXT = 'json';
+
+/* ==== SOQL Extension ==== */
+export const SOQL_CONFIGURATION_NAME = 'salesforcedx-vscode-soql';
+export const SOQL_CONFIG_EDITOR_REMOTE_CHECKS =
+  'experimental.soqlEditorRemoteChecks';

@@ -136,6 +136,17 @@
           "when": "sfdx:project_opened"
         }
       ]
+    },
+    "configuration": {
+      "type": "object",
+      "title": "%configuration_title%",
+      "properties": {
+        "salesforcedx-vscode-soql.experimental.soqlEditorRemoteChecks": {
+          "type": "boolean",
+          "default": false,
+          "description": "%soql_editor_remote_checks_flag%"
+        }
+      }
     }
   }
 }
