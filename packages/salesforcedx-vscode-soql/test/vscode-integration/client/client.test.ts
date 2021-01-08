@@ -8,7 +8,15 @@
 import { expect } from 'chai';
 import * as path from 'path';
 import * as sinon from 'sinon';
-import { extensions, languages, Uri, window, workspace } from 'vscode';
+import {
+  extensions,
+  languages,
+  TextEditor,
+  Uri,
+  window,
+  workspace,
+  commands
+} from 'vscode';
 import { clearDiagnostics } from '../../../src/client/client';
 import { stubMockConnection, MockConnection } from '../testUtilities';
 
@@ -30,6 +38,7 @@ function waitUntil(predicate: () => boolean) {
 describe('SOQL language client', () => {
   let sandbox: sinon.SinonSandbox;
   let soqlFileUri: Uri;
+  let textEditor: TextEditor;
   let mockConnection: MockConnection;
 
   beforeEach(async () => {
@@ -42,12 +51,13 @@ describe('SOQL language client', () => {
 
   afterEach(async () => {
     sandbox.restore();
+    commands.executeCommand('workbench.action.closeActiveEditor');
     await workspace.fs.delete(soqlFileUri);
   });
 
   it('should show diagnostics for syntax error', async () => {
     soqlFileUri = await writeSOQLFile(
-      'testSyntaxError.soql',
+      'testSyntaxError',
       `SELECT Id
       FRM Account
       `
@@ -63,12 +73,12 @@ describe('SOQL language client', () => {
 
   it('should not create diagnostics based off of remote query validation by default', async () => {
     soqlFileUri = await writeSOQLFile(
-      'testSemanticErrors_remoteRunDefault.soql',
+      'testSemanticErrors_remoteRunDefault',
       'SELECT Ids FROM Account'
     );
 
     const querySpy = sandbox.stub(mockConnection, 'query');
-    await window.showTextDocument(soqlFileUri);
+    textEditor = await window.showTextDocument(soqlFileUri);
 
     await sleep(100);
 
@@ -81,15 +91,20 @@ describe('SOQL language client', () => {
 
   it('should not create diagnostics based off of remote query validation when disabled', async () => {
     soqlFileUri = await writeSOQLFile(
-      'testSemanticErrors_remoteRunDefault.soql',
+      'testSemanticErrors_remoteRunDisabled',
       'SELECT Ids FROM Account'
     );
 
     stubSOQLExtensionConfiguration(sandbox, {
-      'experimental.soqlEditorRemoteChecks': true
+      'experimental.soqlEditorRemoteChecks': false
     });
 
-    const querySpy = sandbox.stub(mockConnection, 'query');
+    const expectedError = `SELECT Ids FROM ACCOUNT\nERROR at Row:1:Column:8\nSome error at 'Ids'`;
+    const querySpy = sandbox.stub(mockConnection, 'query').throws({
+      name: 'INVALID_FIELD',
+      errorCode: 'INVALID_FIELD',
+      message: expectedError
+    });
     await window.showTextDocument(soqlFileUri);
 
     await sleep(100);
@@ -103,7 +118,7 @@ describe('SOQL language client', () => {
 
   it('should create diagnostics based off of remote query validation when Enabled', async () => {
     soqlFileUri = await writeSOQLFile(
-      'testSemanticErrors_remoteRun.soql',
+      'testSemanticErrors_remoteRunEnabled',
       '`SELECT Ids FROM Account'
     );
 
@@ -138,7 +153,12 @@ describe('SOQL language client', () => {
   });
 });
 
-async function writeSOQLFile(fileName: string, content: string): Promise<Uri> {
+function generateRandomInt() {
+  return Math.floor(Math.random() * Math.floor(Number.MAX_SAFE_INTEGER));
+}
+
+async function writeSOQLFile(baseName: string, content: string): Promise<Uri> {
+  const fileName = `${baseName}_${generateRandomInt()}.soql`;
   const workspacePath = workspace.workspaceFolders![0].uri.fsPath;
   const encoder = new TextEncoder();
   const fileUri = Uri.file(path.join(workspacePath, fileName));
